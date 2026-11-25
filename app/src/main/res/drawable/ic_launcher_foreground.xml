@@ -1,0 +1,8 @@
+<!-- Sound leaf: a sage leaf with equalizer bars cut out along its vein. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#F3F6F3" android:fillType="evenOdd"
+        android:pathData="M31,77 C31,46 50,28 80,28 C80,58 62,77 31,77 Z M41.8,59.3 A2.3,2.3 0 0 1 46.4,59.3 V66.7 A2.3,2.3 0 0 1 41.8,66.7 Z M49.8,48.3 A2.3,2.3 0 0 1 54.4,48.3 V63.7 A2.3,2.3 0 0 1 49.8,63.7 Z M57.8,37.3 A2.3,2.3 0 0 1 62.4,37.3 V58.7 A2.3,2.3 0 0 1 57.8,58.7 Z M65.8,35.3 A2.3,2.3 0 0 1 70.4,35.3 V44.7 A2.3,2.3 0 0 1 65.8,44.7 Z" />
+    <path android:strokeColor="#F3F6F3" android:strokeWidth="4.5" android:strokeLineCap="round"
+        android:pathData="M33,75 L25,83" />
+</vector>

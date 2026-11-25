@@ -1,0 +1,30 @@
+# Gradle and Kotlin build state
+.gradle/
+.kotlin/
+**/build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Machine-specific settings (Android SDK path etc.)
+local.properties
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+
+# Signing keys and secrets — never commit these
+*.jks
+*.keystore
+keystore.properties
+
+# Built packages
+*.apk
+*.aab
+
+# Logs, heap dumps and OS clutter
+*.log
+*.hprof
+.DS_Store
+Thumbs.db
