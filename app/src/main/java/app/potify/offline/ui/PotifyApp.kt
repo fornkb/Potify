@@ -67,6 +67,9 @@ private const val SEARCH = "search"
 private const val LIKED = "liked"
 private const val SETTINGS = "settings"
 private const val PLAYLIST = "playlist:"
+private const val REVIEW = "review"
+private const val DUPLICATES = "duplicates"
+private const val MERGE = "merge"
 
 private val StackSaver = listSaver<SnapshotStateList<String>, String>(
     save = { it.toList() },
@@ -96,6 +99,7 @@ fun PotifyApp(
     }
 
     LaunchedEffect(Unit) { vm.messages.collect(::message) }
+    LaunchedEffect(Unit) { vm.openReview.collect { if (stack.last() != REVIEW) stack.add(REVIEW) } }
     LaunchedEffect(sharedLink.value) {
         sharedLink.value?.let {
             link = it
@@ -155,17 +159,33 @@ fun PotifyApp(
                             onSubmitLink = {
                                 when (val result = vm.addLink(link, onQueued)) {
                                     LinkResult.Invalid ->
-                                        linkError = "That doesn't look like a YouTube video or playlist link."
+                                        linkError = "That doesn't look like a YouTube or Spotify link."
                                     LinkResult.Added -> {
                                         link = ""
                                         linkError = null
+                                    }
+                                    LinkResult.Spotify -> {
+                                        link = ""
+                                        linkError = null
+                                        push(REVIEW)
                                     }
                                     is LinkResult.Ambiguous -> choice = result
                                 }
                             },
                             onOpen = open,
                             onSettings = { push(SETTINGS) },
+                            onOpenReview = { push(REVIEW) },
                             padding = padding,
+                        )
+                        current == REVIEW -> SpotifyReviewScreen(
+                            vm, player, onBack = ::back,
+                            onClosed = { if (stack.last() == REVIEW) back() },
+                            onQueued = onQueued,
+                            onSaved = { id ->
+                                if (stack.last() == REVIEW) stack.removeAt(stack.lastIndex)
+                                push(PLAYLIST + id)
+                            },
+                            onMessage = ::message, padding = padding,
                         )
                         current == SEARCH -> SearchScreen(vm, player, onOpen = open, padding = padding)
                         current == SETTINGS -> SettingsScreen(vm, onBack = ::back, padding = padding)
@@ -176,7 +196,19 @@ fun PotifyApp(
                         current.startsWith(PLAYLIST) -> PlaylistScreen(
                             current.removePrefix(PLAYLIST), vm, player, showBack = true,
                             onBack = ::back, onMessage = ::message, padding = padding,
+                            onFindDuplicates = { push(DUPLICATES) },
+                            onSelectToMerge = { push(MERGE) },
                         )
+                        current == DUPLICATES -> DuplicatesScreen(
+                            vm, player, onBack = ::back,
+                            onDone = { if (stack.last() == DUPLICATES) back() },
+                            onSelectYourself = {
+                                if (stack.last() == DUPLICATES) stack.removeAt(stack.lastIndex)
+                                push(MERGE)
+                            },
+                            padding = padding,
+                        )
+                        current == MERGE -> MergeScreen(vm, player, onBack = ::back, padding = padding)
                     }
                 }
             }

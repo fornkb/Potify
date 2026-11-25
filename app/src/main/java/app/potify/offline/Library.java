@@ -28,8 +28,12 @@ public final class Library extends SQLiteOpenHelper {
 
     public static final String YOUTUBE = "youtube";
     public static final String LOCAL = "local";
+    /** A playlist or album imported from a Spotify link; its songs were matched to YouTube videos. */
+    public static final String SPOTIFY = "spotify";
     /** Pseudo playlist id for the Liked songs list. */
     public static final String LIKED = "liked";
+    /** Pseudo playlist id for All songs: every song in any playlist or in Liked songs. */
+    public static final String ALL = "all";
     /** Your playlist that collects songs added from single video links. */
     public static final String ADDED = "local:added";
     /** Title shown for a single video until its details are fetched. */
@@ -39,7 +43,11 @@ public final class Library extends SQLiteOpenHelper {
                            int total, int saved, int failed, int pending, long bytes, long seconds,
                            List<String> thumbs) {
         public boolean isLocal() { return LOCAL.equals(kind); }
+        public boolean isSpotify() { return SPOTIFY.equals(kind); }
     }
+
+    /** A song matched from Spotify: the YouTube video to download plus Spotify's own details. */
+    public record ImportedSong(String videoId, String title, String artist, long seconds, String sourceId) {}
 
     public record Track(String id, String title, String artist, String status, String file, String error,
                         long seconds, String thumb, long bytes, boolean liked) {
@@ -66,7 +74,7 @@ public final class Library extends SQLiteOpenHelper {
     }
 
     private Library(Context context) {
-        super(context, "library.db", null, 2);
+        super(context, "library.db", null, 4);
         audioDir = new File(context.getFilesDir(), "audio");
         thumbDir = new File(context.getFilesDir(), "thumbs");
         setWriteAheadLoggingEnabled(true);
@@ -86,8 +94,31 @@ public final class Library extends SQLiteOpenHelper {
                 + "artist TEXT, status TEXT NOT NULL, file TEXT, error TEXT, "
                 + "duration INTEGER, thumb TEXT, size INTEGER, liked INTEGER)");
         db.execSQL("CREATE TABLE playlist_items(playlist_id TEXT REFERENCES playlists(id), "
-                + "position INTEGER, track_id TEXT REFERENCES tracks(id), PRIMARY KEY(playlist_id, position))");
+                + "position INTEGER, track_id TEXT REFERENCES tracks(id), source_id TEXT, "
+                + "PRIMARY KEY(playlist_id, position))");
         db.execSQL("CREATE INDEX items_by_track ON playlist_items(track_id)");
+        createKnownSources(db);
+    }
+
+    /**
+     * Spotify songs a playlist already covers without an item of their own: two Spotify entries
+     * matched to one video, or a duplicate merged into a copy the playlist already had. A refresh
+     * treats them as saved instead of offering them again.
+     */
+    private static void createKnownSources(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS known_sources(playlist_id TEXT NOT NULL, "
+                + "source_id TEXT NOT NULL, PRIMARY KEY(playlist_id, source_id))");
+        // Videos merged into another copy of the same song: when a playlist refresh, a link or a
+        // Spotify match brings one back, the kept copy is used instead.
+        db.execSQL("CREATE TABLE IF NOT EXISTS aliases(video_id TEXT PRIMARY KEY, track_id TEXT NOT NULL)");
+    }
+
+    /** The song to use for a video: the kept copy if the video was merged into one, else the video. */
+    private static String resolve(SQLiteDatabase db, String videoId) {
+        try (Cursor c = db.rawQuery("SELECT a.track_id FROM aliases a JOIN tracks t ON t.id=a.track_id "
+                + "WHERE a.video_id=?", new String[]{videoId})) {
+            return c.moveToFirst() ? c.getString(0) : videoId;
+        }
     }
 
     @Override
@@ -99,6 +130,11 @@ public final class Library extends SQLiteOpenHelper {
             db.execSQL("ALTER TABLE tracks ADD COLUMN size INTEGER");
             db.execSQL("ALTER TABLE tracks ADD COLUMN liked INTEGER");
         }
+        if (oldVersion < 3) {
+            // The Spotify track id an item was matched from, so a refresh knows what's new.
+            db.execSQL("ALTER TABLE playlist_items ADD COLUMN source_id TEXT");
+        }
+        if (oldVersion < 4) createKnownSources(db);
     }
 
     // ---- change notifications -------------------------------------------------------------
@@ -218,7 +254,12 @@ public final class Library extends SQLiteOpenHelper {
         try {
             db.delete("playlist_items", "playlist_id=?", new String[]{id});
             int position = 0;
-            for (YouTubeSource.Entry entry : playlist.entries()) {
+            var listed = new HashSet<String>();
+            for (YouTubeSource.Entry original : playlist.entries()) {
+                // A YouTube playlist can hold the same video twice; list it once.
+                String trackId = resolve(db, original.id());
+                if (!listed.add(trackId)) continue;
+                var entry = new YouTubeSource.Entry(trackId, original.title(), original.artist(), original.seconds());
                 var track = new ContentValues();
                 track.put("id", entry.id());
                 track.put("title", entry.title() == null ? "Untitled video" : entry.title());
@@ -295,6 +336,7 @@ public final class Library extends SQLiteOpenHelper {
 
     public List<Track> tracks(String playlist) {
         if (LIKED.equals(playlist)) return likedTracks();
+        if (ALL.equals(playlist)) return allTracks();
         return readTracks("SELECT " + TRACK_COLUMNS + " FROM playlist_items i "
                 + "JOIN tracks t ON i.track_id=t.id WHERE i.playlist_id=? ORDER BY i.position", playlist);
     }
@@ -302,6 +344,18 @@ public final class Library extends SQLiteOpenHelper {
     public List<Track> likedTracks() {
         return readTracks("SELECT " + TRACK_COLUMNS + " FROM tracks t WHERE t.liked IS NOT NULL "
                 + "ORDER BY t.liked DESC");
+    }
+
+    /** Every song in the library, A to Z. */
+    public List<Track> allTracks() {
+        return readTracks("SELECT " + TRACK_COLUMNS + " FROM tracks t WHERE " + IN_LIBRARY
+                + " ORDER BY t.title COLLATE NOCASE, t.rowid");
+    }
+
+    public int songCount() {
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*) FROM tracks t WHERE " + IN_LIBRARY, null)) {
+            return c.moveToFirst() ? c.getInt(0) : 0;
+        }
     }
 
     public Track track(String id) {
@@ -345,12 +399,13 @@ public final class Library extends SQLiteOpenHelper {
      * Queues one video and adds it to the Added songs playlist (created when needed).
      * Returns true when the song was already downloaded.
      */
-    public synchronized boolean addVideo(String videoId) {
+    public synchronized boolean addVideo(String video) {
         SQLiteDatabase db = getWritableDatabase();
         boolean saved;
         long now = System.currentTimeMillis();
         db.beginTransaction();
         try {
+            String videoId = resolve(db, video);
             var playlist = new ContentValues();
             playlist.put("id", ADDED);
             playlist.put("title", "Added songs");
@@ -410,6 +465,106 @@ public final class Library extends SQLiteOpenHelper {
             updated += db.update("tracks", values, "id=? AND (duration IS NULL OR duration<=0)", new String[]{trackId});
         }
         if (updated > 0) changed();
+    }
+
+    // ---- Spotify imports ---------------------------------------------------------------------------
+
+    /**
+     * Saves songs matched from a Spotify link and queues their downloads. A playlist or album
+     * becomes (or grows) a Spotify playlist; a single song goes to Added songs. Songs keep
+     * Spotify's title and artists. Returns how many songs were newly added to the playlist.
+     */
+    public synchronized int addImportedSongs(String playlistId, String title, String kind, List<ImportedSong> songs) {
+        SQLiteDatabase db = getWritableDatabase();
+        long now = System.currentTimeMillis();
+        int added = 0;
+        db.beginTransaction();
+        try {
+            var playlist = new ContentValues();
+            playlist.put("id", playlistId);
+            playlist.put("title", title);
+            playlist.put("status", SAVED);
+            playlist.put("kind", kind);
+            playlist.put("updated", now);
+            db.insertWithOnConflict("playlists", null, playlist, SQLiteDatabase.CONFLICT_IGNORE);
+            db.execSQL("UPDATE playlists SET updated=? WHERE id=?", new Object[]{now, playlistId});
+            if (SPOTIFY.equals(kind)) {
+                db.execSQL("UPDATE playlists SET title=? WHERE id=?", new Object[]{title, playlistId});
+            }
+            int position = 0;
+            try (Cursor c = db.rawQuery("SELECT COALESCE(MAX(position)+1,0) FROM playlist_items WHERE playlist_id=?",
+                    new String[]{playlistId})) {
+                if (c.moveToFirst()) position = c.getInt(0);
+            }
+            for (ImportedSong matched : songs) {
+                String videoId = resolve(db, matched.videoId());
+                var song = new ImportedSong(videoId, matched.title(), matched.artist(), matched.seconds(), matched.sourceId());
+                var track = new ContentValues();
+                track.put("id", song.videoId());
+                track.put("title", song.title());
+                track.put("artist", song.artist());
+                track.put("status", QUEUED);
+                if (song.seconds() > 0) track.put("duration", song.seconds());
+                db.insertWithOnConflict("tracks", null, track, SQLiteDatabase.CONFLICT_IGNORE);
+                // A video saved before under YouTube's placeholder title gets Spotify's details.
+                db.execSQL("UPDATE tracks SET title=?, artist=? WHERE id=? AND title=?",
+                        new Object[]{song.title(), song.artist(), song.videoId(), PLACEHOLDER_TITLE});
+                db.execSQL("UPDATE tracks SET status=?, error=NULL WHERE id=? AND status IN (?,?)",
+                        new Object[]{QUEUED, song.videoId(), REMOVED, FAILED});
+                boolean listed;
+                try (Cursor c = db.rawQuery("SELECT 1 FROM playlist_items WHERE playlist_id=? AND track_id=?",
+                        new String[]{playlistId, song.videoId()})) {
+                    listed = c.moveToFirst();
+                }
+                if (listed) {
+                    rememberSource(db, playlistId, song.sourceId());
+                    continue;
+                }
+                var item = new ContentValues();
+                item.put("playlist_id", playlistId);
+                item.put("position", position++);
+                item.put("track_id", song.videoId());
+                item.put("source_id", song.sourceId());
+                db.insertOrThrow("playlist_items", null, item);
+                added++;
+            }
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+        changed();
+        return added;
+    }
+
+    /** Spotify track ids already in a playlist, so a refresh only reviews the new songs. */
+    public Set<String> importedSourceIds(String playlistId) {
+        var ids = new HashSet<String>();
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT source_id FROM playlist_items WHERE playlist_id=? AND source_id IS NOT NULL "
+                        + "UNION SELECT source_id FROM known_sources WHERE playlist_id=?",
+                new String[]{playlistId, playlistId})) {
+            while (c.moveToNext()) ids.add(c.getString(0));
+        }
+        return ids;
+    }
+
+    private static void rememberSource(SQLiteDatabase db, String playlistId, String sourceId) {
+        if (sourceId == null) return;
+        var values = new ContentValues();
+        values.put("playlist_id", playlistId);
+        values.put("source_id", sourceId);
+        db.insertWithOnConflict("known_sources", null, values, SQLiteDatabase.CONFLICT_IGNORE);
+    }
+
+    /**
+     * The library's song for a Spotify track imported before (from any playlist), so a new import
+     * reuses that video instead of downloading another copy. Songs whose download failed are left
+     * out: their video may be gone.
+     */
+    public Track trackForSource(String sourceId) {
+        var found = readTracks("SELECT " + TRACK_COLUMNS + " FROM playlist_items i JOIN tracks t ON t.id=i.track_id "
+                + "WHERE i.source_id=? AND t.status<>? ORDER BY (t.status='saved') DESC LIMIT 1", sourceId, FAILED);
+        return found.isEmpty() ? null : found.get(0);
     }
 
     // ---- likes and your own playlists ----------------------------------------------------------
@@ -477,6 +632,85 @@ public final class Library extends SQLiteOpenHelper {
         changed();
     }
 
+    // ---- duplicates ------------------------------------------------------------------------------
+
+    /** Titles of the playlists each song is in, keyed by track id. */
+    public Map<String, List<String>> playlistTitlesByTrack() {
+        var titles = new HashMap<String, List<String>>();
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT i.track_id, p.title FROM playlist_items i "
+                + "JOIN playlists p ON p.id=i.playlist_id ORDER BY p.updated DESC", null)) {
+            while (c.moveToNext()) {
+                List<String> list = titles.computeIfAbsent(c.getString(0), k -> new ArrayList<>());
+                if (!list.contains(c.getString(1))) list.add(c.getString(1));
+            }
+        }
+        return titles;
+    }
+
+    /** Songs that came from a Spotify import, so their title and artists are Spotify's clean ones. */
+    public Set<String> spotifyTrackIds() {
+        var ids = new HashSet<String>();
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT DISTINCT track_id FROM playlist_items WHERE source_id IS NOT NULL", null)) {
+            while (c.moveToNext()) ids.add(c.getString(0));
+        }
+        return ids;
+    }
+
+    /**
+     * Merges copies of one song into the copy that's kept: every playlist that had a removed copy
+     * now has the kept one in its place (or keeps just the one it already had), a like carries
+     * over, and the removed copies are deleted with their audio and artwork.
+     */
+    public synchronized void mergeTracks(String keep, List<String> remove) {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            Long liked = null;
+            try (Cursor c = db.rawQuery("SELECT liked FROM tracks WHERE id=?", new String[]{keep})) {
+                if (!c.moveToFirst()) return; // The kept song is gone; change nothing.
+                if (!c.isNull(0)) liked = c.getLong(0);
+            }
+            for (String id : remove) {
+                if (id.equals(keep)) continue;
+                var items = new ArrayList<String[]>();
+                try (Cursor c = db.rawQuery("SELECT playlist_id, position, source_id FROM playlist_items WHERE track_id=?",
+                        new String[]{id})) {
+                    while (c.moveToNext()) items.add(new String[]{c.getString(0), c.getString(1), c.getString(2)});
+                }
+                for (String[] item : items) {
+                    boolean hasKept;
+                    try (Cursor c = db.rawQuery("SELECT 1 FROM playlist_items WHERE playlist_id=? AND track_id=?",
+                            new String[]{item[0], keep})) {
+                        hasKept = c.moveToFirst();
+                    }
+                    if (hasKept) {
+                        db.delete("playlist_items", "playlist_id=? AND position=?", new String[]{item[0], item[1]});
+                        rememberSource(db, item[0], item[2]);
+                    } else {
+                        var values = new ContentValues();
+                        values.put("track_id", keep);
+                        db.update("playlist_items", values, "playlist_id=? AND position=?", new String[]{item[0], item[1]});
+                    }
+                }
+                try (Cursor c = db.rawQuery("SELECT liked FROM tracks WHERE id=?", new String[]{id})) {
+                    // The earliest like wins, so the song keeps its place in Liked songs.
+                    if (c.moveToFirst() && !c.isNull(0) && (liked == null || c.getLong(0) < liked)) liked = c.getLong(0);
+                }
+                db.execSQL("UPDATE tracks SET liked=NULL WHERE id=?", new Object[]{id});
+                db.execSQL("UPDATE aliases SET track_id=? WHERE track_id=?", new Object[]{keep, id});
+                db.execSQL("INSERT OR REPLACE INTO aliases(video_id, track_id) VALUES(?,?)", new Object[]{id, keep});
+            }
+            db.execSQL("DELETE FROM aliases WHERE video_id=?", new Object[]{keep});
+            if (liked != null) db.execSQL("UPDATE tracks SET liked=? WHERE id=?", new Object[]{liked, keep});
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+        pruneOrphans();
+        changed();
+    }
+
     // ---- deleting and storage ------------------------------------------------------------------
 
     public void deletePlaylist(String id) {
@@ -484,6 +718,7 @@ public final class Library extends SQLiteOpenHelper {
         db.beginTransaction();
         try {
             db.delete("playlist_items", "playlist_id=?", new String[]{id});
+            db.delete("known_sources", "playlist_id=?", new String[]{id});
             db.delete("playlists", "id=?", new String[]{id});
             db.setTransactionSuccessful();
         } finally {

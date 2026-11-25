@@ -33,6 +33,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.PauseCircleOutline
 import androidx.compose.material.icons.rounded.Settings
@@ -69,7 +70,7 @@ import app.potify.offline.DownloadState
 import app.potify.offline.Library
 import kotlinx.coroutines.launch
 
-private enum class Filter(val label: String) { ALL("All"), YOUTUBE("From YouTube"), YOURS("Yours") }
+private enum class Filter(val label: String) { ALL("All"), YOUTUBE("From links"), YOURS("Yours") }
 
 @Composable
 fun LibraryScreen(
@@ -80,10 +81,12 @@ fun LibraryScreen(
     onSubmitLink: () -> Unit,
     onOpen: (String) -> Unit,
     onSettings: () -> Unit,
+    onOpenReview: () -> Unit,
     padding: PaddingValues,
 ) {
     val playlists by vm.playlists.collectAsStateWithLifecycle()
     val liked by vm.liked.collectAsStateWithLifecycle()
+    val songCount by vm.songCount.collectAsStateWithLifecycle()
     val downloads by vm.downloads.collectAsStateWithLifecycle()
     var filter by rememberSaveable { mutableIntStateOf(0) }
     var creating by remember { mutableStateOf(false) }
@@ -114,6 +117,9 @@ fun LibraryScreen(
         item(span = { GridItemSpan(maxLineSpan) }) {
             LinkField(link, linkError, onLinkChange, onSubmitLink)
         }
+        vm.spotify?.let { review ->
+            item(span = { GridItemSpan(maxLineSpan) }) { ReviewBanner(review, onOpenReview) }
+        }
         if (downloads.visible) {
             item(span = { GridItemSpan(maxLineSpan) }) {
                 DownloadBanner(downloads, onPause = vm::pauseDownloads, onResume = vm::startDownloads)
@@ -138,6 +144,9 @@ fun LibraryScreen(
                 }
             }
         }
+        if (selected != Filter.YOUTUBE && songCount > 0) {
+            item { AllSongsTile(songCount) { onOpen(Library.ALL) } }
+        }
         if (selected != Filter.YOUTUBE && (liked.isNotEmpty() || selected == Filter.YOURS)) {
             item { LikedTile(liked.size) { onOpen(Library.LIKED) } }
         }
@@ -153,7 +162,7 @@ fun LibraryScreen(
                     )
                     else -> EmptyMessage(
                         "Start your library",
-                        "Paste a YouTube video or playlist link above. Its audio is saved to this phone so you can listen offline.",
+                        "Paste a YouTube or Spotify link above: a playlist, an album or a single song. Its audio is saved to this phone so you can listen offline.",
                     )
                 }
             }
@@ -192,7 +201,7 @@ private fun LinkField(value: String, error: String?, onChange: (String) -> Unit,
                 Spacer(Modifier.width(10.dp))
                 Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
                     if (value.isEmpty()) {
-                        Text("Paste a YouTube link", maxLines = 1, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                        Text("YouTube or Spotify link", maxLines = 1, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
                     }
                     BasicTextField(
                         value = value,
@@ -293,6 +302,23 @@ private fun LikedTile(count: Int, onClick: () -> Unit) {
     }
 }
 
+/** Every song from every playlist, in one list. */
+@Composable
+private fun AllSongsTile(count: Int, onClick: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    Column(Modifier.clickable(onClick = onClick)) {
+        Box(
+            Modifier.fillMaxWidth().aspectRatio(1f).background(colors.tertiaryContainer, MaterialTheme.shapes.medium),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Rounded.LibraryMusic, null, Modifier.size(44.dp), tint = colors.onTertiaryContainer)
+        }
+        Spacer(Modifier.height(8.dp))
+        Text("All songs", style = MaterialTheme.typography.titleSmall, maxLines = 1)
+        Text("$count ${if (count == 1) "song" else "songs"}", style = Muted)
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun PlaylistTile(playlist: Library.Playlist, onClick: () -> Unit, onLongClick: () -> Unit) {
@@ -325,6 +351,38 @@ private fun PlaylistTile(playlist: Library.Playlist, onClick: () -> Unit, onLong
                 style = Muted,
                 maxLines = 1,
             )
+        }
+    }
+}
+
+/** Shown on the library while a Spotify link's review is unfinished. */
+@Composable
+private fun ReviewBanner(review: app.potify.offline.SpotifyImport, onOpen: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val list = review.list
+    val title = when {
+        list == null -> "Reading Spotify link…"
+        review.refreshOf != null -> "New songs in ${list.name}"
+        else -> list.name
+    }
+    val detail = when {
+        review.phase is app.potify.offline.SpotifyImport.Phase.Failed -> "Couldn't read this link"
+        review.isMatching -> "Finding songs on YouTube · ${review.matchedCount} of ${review.rows.size}"
+        else -> "${review.rows.size} ${if (review.rows.size == 1) "song" else "songs"} ready to review"
+    }
+    Surface(
+        onClick = onOpen,
+        shape = MaterialTheme.shapes.medium,
+        color = colors.primaryContainer,
+    ) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Link, null, Modifier.size(20.dp), tint = colors.onPrimaryContainer)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.bodyLarge, color = colors.onPrimaryContainer, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(detail, style = MaterialTheme.typography.bodySmall, color = colors.onPrimaryContainer.copy(alpha = 0.75f))
+            }
+            Text("Review", style = MaterialTheme.typography.labelLarge, color = colors.primary)
         }
     }
 }

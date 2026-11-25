@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -58,23 +59,31 @@ fun PlaylistScreen(
     onBack: () -> Unit,
     onMessage: (String) -> Unit,
     padding: PaddingValues,
+    onFindDuplicates: () -> Unit = {},
+    onSelectToMerge: () -> Unit = {},
 ) {
     val isLiked = id == Library.LIKED
+    val isAll = id == Library.ALL
     val playlists by vm.playlists.collectAsStateWithLifecycle()
-    val playlist = if (isLiked) null else playlists?.find { it.id() == id }
+    val playlist = if (isLiked || isAll) null else playlists?.find { it.id() == id }
     val tracks by remember(id) { vm.tracks(id) }.collectAsStateWithLifecycle(null)
     val progress by vm.progress.collectAsStateWithLifecycle()
     val downloads by vm.downloads.collectAsStateWithLifecycle()
     var trackSheet by remember { mutableStateOf<Library.Track?>(null) }
     var playlistSheet by remember { mutableStateOf(false) }
+    var allSheet by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val title = if (isLiked) "Liked songs" else playlist?.title().orEmpty()
+    val title = when {
+        isLiked -> "Liked songs"
+        isAll -> "All songs"
+        else -> playlist?.title().orEmpty()
+    }
     val list = tracks.orEmpty()
     val isThisPlaying = player.isPlaying && player.sourceTitle == title
 
     // The playlist was deleted (here or elsewhere): leave the screen.
-    LaunchedEffect(playlists, isLiked) {
-        if (!isLiked && playlists != null && playlist == null) onBack()
+    LaunchedEffect(playlists, isLiked, isAll) {
+        if (!isLiked && !isAll && playlists != null && playlist == null) onBack()
     }
 
     fun play(startId: String?, shuffle: Boolean) = scope.launch {
@@ -101,6 +110,8 @@ fun PlaylistScreen(
                 Spacer(Modifier.weight(1f))
                 if (playlist != null) {
                     IconButton(onClick = { playlistSheet = true }) { Icon(Icons.Rounded.MoreVert, "Playlist options") }
+                } else if (isAll && list.size > 1) {
+                    IconButton(onClick = { allSheet = true }) { Icon(Icons.Rounded.MoreVert, "All songs options") }
                 }
             }
         }
@@ -113,6 +124,13 @@ fun PlaylistScreen(
                             contentAlignment = Alignment.Center,
                         ) {
                             Icon(Icons.Rounded.Favorite, null, Modifier.size(64.dp), tint = MaterialTheme.colorScheme.primary)
+                        }
+                    } else if (isAll) {
+                        Box(
+                            Modifier.size(196.dp).background(MaterialTheme.colorScheme.tertiaryContainer, MaterialTheme.shapes.large),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(Icons.Rounded.LibraryMusic, null, Modifier.size(64.dp), tint = MaterialTheme.colorScheme.onTertiaryContainer)
                         }
                     } else {
                         Cover(playlist?.thumbs().orEmpty(), id, Modifier.size(196.dp), corner = 20.dp)
@@ -205,6 +223,7 @@ fun PlaylistScreen(
             item {
                 when {
                     isLiked -> EmptyMessage("Songs you like show up here", "Tap the heart on any song to save it to Liked songs.")
+                    isAll -> EmptyMessage("No songs yet", "Songs from all your playlists and Liked songs show up here.")
                     playlist?.isLocal == true -> EmptyMessage("This playlist is empty", "Add songs from any playlist with ⋮ → Add to playlist.")
                     else -> EmptyMessage("No songs yet", "They'll appear here once the playlist has been read.")
                 }
@@ -218,5 +237,19 @@ fun PlaylistScreen(
     }
     if (playlistSheet && playlist != null) {
         PlaylistActionsSheet(playlist, vm, onDismiss = { playlistSheet = false })
+    }
+    if (allSheet) {
+        AllSongsSheet(
+            count = list.size,
+            onFindDuplicates = {
+                allSheet = false
+                onFindDuplicates()
+            },
+            onSelect = {
+                allSheet = false
+                onSelectToMerge()
+            },
+            onDismiss = { allSheet = false },
+        )
     }
 }

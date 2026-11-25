@@ -27,7 +27,8 @@ import okhttp3.OkHttpClient;
  * workers pulling from the queue, each fetching its track in parallel byte-range chunks.
  */
 final class DownloadBatch {
-    private static final YouTubeSource SOURCE = new YouTubeSource();
+    /** Shared with Spotify matching and previews: it also sets up NewPipe, which is global. */
+    static final YouTubeSource SOURCE = new YouTubeSource();
     private static final ExecutorService BATCHES = Executors.newSingleThreadExecutor();
     /** Tracks downloading at the same time. */
     private static final int TRACK_WORKERS = 3;

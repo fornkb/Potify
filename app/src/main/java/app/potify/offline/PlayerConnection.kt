@@ -125,6 +125,10 @@ class PlayerConnection(private val context: Context) {
         }
     }
 
+    fun pause() {
+        controller?.pause()
+    }
+
     fun next() {
         controller?.takeIf { it.hasNextMediaItem() }?.seekToNextMediaItem()
     }
@@ -178,6 +182,23 @@ class PlayerConnection(private val context: Context) {
             c.sendCustomCommand(SessionCommand(PlaybackService.MOVE_IN_PLAY_ORDER, Bundle.EMPTY), args)
         } else {
             c.moveMediaItem(from, to)
+        }
+    }
+
+    /**
+     * After duplicates were merged: removed songs leave the queue, except the one playing, which
+     * switches to the kept copy (when that one is downloaded) since its file is gone.
+     */
+    fun replaceMerged(replacements: Map<String, MediaItem?>) {
+        val c = controller ?: return
+        if (replacements.isEmpty()) return
+        val current = c.currentMediaItemIndex
+        for (i in c.mediaItemCount - 1 downTo 0) {
+            val id = c.getMediaItemAt(i).mediaId
+            if (!replacements.containsKey(id)) continue
+            val kept = replacements[id]
+            if (i != current) c.removeMediaItem(i)
+            else if (kept != null) c.replaceMediaItem(i, kept)
         }
     }
 

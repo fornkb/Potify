@@ -429,7 +429,11 @@ fun PlaylistActionsSheet(
                 Cover(playlist.thumbs(), playlist.id(), Modifier.size(48.dp), corner = 8.dp)
             }
             if (!playlist.isLocal) {
-                SheetAction(Icons.Rounded.Refresh, "Refresh from YouTube", "Downloads songs added since last time") {
+                SheetAction(
+                    Icons.Rounded.Refresh,
+                    if (playlist.isSpotify) "Refresh from Spotify" else "Refresh from YouTube",
+                    if (playlist.isSpotify) "Review and download songs added since last time" else "Downloads songs added since last time",
+                ) {
                     vm.refresh(playlist.id())
                     onDismiss()
                 }

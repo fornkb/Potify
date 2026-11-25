@@ -2,6 +2,9 @@ package app.potify.offline
 
 import android.app.Application
 import android.media.MediaMetadataRetriever
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
@@ -34,6 +37,8 @@ data class DownloadState(val summary: Library.DownloadSummary, val running: Bool
 sealed interface LinkResult {
     data object Invalid : LinkResult
     data object Added : LinkResult
+    /** A Spotify link: its songs are matched on the review screen before anything downloads. */
+    data object Spotify : LinkResult
     /** A video opened from a playlist: ask whether to save just the song or the whole playlist. */
     data class Ambiguous(val videoId: String, val playlistId: String) : LinkResult
 }
@@ -57,6 +62,7 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         library.removeListener(listener)
+        preview.release()
     }
 
     /** Re-runs [query] off the main thread whenever the library changes. */
@@ -68,6 +74,10 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
 
     val liked: StateFlow<List<Library.Track>> =
         live { library.likedTracks() }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** How many songs All songs lists. */
+    val songCount: StateFlow<Int> =
+        live { library.songCount() }.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
 
     private val ticker = flow {
         while (true) {
@@ -120,6 +130,10 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
      * opened from a playlist carries both, and the caller asks which one was meant.
      */
     fun addLink(text: String, onQueued: () -> Unit): LinkResult {
+        if (Spotify.looksLikeSpotify(text)) {
+            reviewSpotify(text)
+            return LinkResult.Spotify
+        }
         val parsed = try {
             YouTubeLink.parse(text)
         } catch (e: IllegalArgumentException) {
@@ -171,7 +185,56 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
         changes.update { it + 1 }
     }
 
-    fun refresh(playlistId: String) = io({ library.enqueue(playlistId) }) { startDownloads() }
+    /** YouTube playlists re-read in the background; Spotify ones open the review for new songs. */
+    fun refresh(playlistId: String) {
+        val spotifyRef = SpotifyRef.fromPlaylistId(playlistId)
+        if (spotifyRef != null) {
+            reviewSpotify(spotifyRef.url, refreshOf = playlistId)
+            openReview.tryEmit(Unit)
+        } else {
+            io({ library.enqueue(playlistId) }) { startDownloads() }
+        }
+    }
+
+    // ---- Spotify ----
+
+    /** The Spotify link being reviewed, including one left unfinished last time. */
+    var spotify by mutableStateOf(SpotifyImport.restore(app, viewModelScope))
+        private set
+    /** Asks the screen to show the review, e.g. after a refresh started from a playlist. */
+    val openReview = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val preview = PreviewPlayer(app)
+
+    fun reviewSpotify(text: String, refreshOf: String? = null) {
+        preview.stop()
+        spotify?.cancel()
+        spotify = SpotifyImport.start(app, viewModelScope, text, refreshOf)
+    }
+
+    /** Saves the reviewed songs and queues them; [onSaved] gets the playlist to open. */
+    fun finishSpotify(onQueued: () -> Unit, onSaved: (String) -> Unit) {
+        val import = spotify ?: return
+        preview.stop()
+        viewModelScope.launch {
+            val (playlistId, added) = import.finish()
+            spotify = null
+            say(
+                when {
+                    added == 0 -> "Nothing new to add"
+                    import.refreshOf != null -> "Added $added new ${if (added == 1) "song" else "songs"} · downloading starts shortly"
+                    else -> "$added ${if (added == 1) "song" else "songs"} added · downloading starts shortly"
+                }
+            )
+            if (added > 0) onQueued()
+            onSaved(playlistId)
+        }
+    }
+
+    fun discardSpotify() {
+        preview.stop()
+        spotify?.cancel()
+        spotify = null
+    }
 
     fun retry(playlistId: String) = io({ library.retry(playlistId) }) { startDownloads() }
 
@@ -199,6 +262,44 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
         io({ library.removeFromPlaylist(playlistId, trackId) })
 
     fun setLiked(trackId: String, liked: Boolean) = io({ library.setLiked(trackId, liked) })
+
+    // ---- duplicates ----
+
+    suspend fun findDuplicates(): List<DuplicateGroup> = withContext(Dispatchers.IO) { Duplicates.find(library) }
+
+    /** The songs the user ticked, with the copy most worth keeping first. */
+    suspend fun describeCopies(ids: List<String>): List<SongCopy> =
+        withContext(Dispatchers.IO) { Duplicates.suggestKeep(Duplicates.describe(library, ids)) }
+
+    /**
+     * Keeps one copy of each song and removes the others: playlists that had a removed copy get
+     * the kept one instead. [onDone] gets, for each removed song, the kept song to play in its
+     * place (null when that one isn't downloaded), so the play queue can follow.
+     */
+    fun mergeDuplicates(merges: List<Pair<String, List<String>>>, onDone: (Map<String, MediaItem?>) -> Unit) =
+        viewModelScope.launch {
+            val (removed, freed, replacements) = withContext(Dispatchers.IO) {
+                val all = merges.flatMap { (keep, others) -> others.filter { it != keep } }
+                val tracks = library.tracksByIds(all + merges.map { it.first })
+                var freed = 0L
+                for (id in all) tracks[id]?.takeIf { it.isSaved }?.let { freed += it.bytes() }
+                for ((keep, others) in merges) library.mergeTracks(keep, others)
+                val replacements = HashMap<String, MediaItem?>()
+                for ((keep, others) in merges) {
+                    val kept = library.track(keep)?.takeIf { it.isSaved && library.audioFile(it.file()).isFile }
+                    val item = kept?.let { MediaItems.from(library, it) }
+                    for (id in others) if (id != keep) replacements[id] = item
+                }
+                Triple(all.size, freed, replacements)
+            }
+            say(
+                buildString {
+                    append("Removed $removed ${if (removed == 1) "duplicate" else "duplicates"}")
+                    if (freed > 0) append(" · freed ${formatBytes(freed)}")
+                }
+            )
+            onDone(replacements)
+        }
 
     // ---- settings ----
 
